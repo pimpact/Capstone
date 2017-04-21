@@ -1,0 +1,188 @@
+---
+title: "capstone project paper"
+author: "Nick Yuk"
+date: "March 12, 2017"
+output: word_document
+---
+###Appendix A: Database Extraction, Cleaning, Manipulation  
+```{r database, eval = FALSE}
+setwd("~/berkeley/capstone")
+
+#neccessary libraries
+library(RCurl)
+library(dplyr)
+library(data.table)
+library(lubridate)
+library(readr)
+library(tidyr)
+
+#download patent data base as dataframe
+URL      <- "http://funglab.berkeley.edu/pub2/records_0714.tsv"
+destfile <- "fung lab records.tsv"
+download.file(URL, destfile)
+data <- read.delim("fung lab records.tsv")
+data <- as.data.frame(data)
+
+#check data attributes
+typeof(data)
+class(data)
+head(data, 5)
+
+#save as Rdata file
+write.csv(data, file = "allrecords.RData")
+load("allrecords.Rdata")
+
+#manipulate date format
+data$GrantDate <- as.Date(data$GrantDate) 
+data$y <- format(as.Date(data$GrantDate, format="%d/%m/%Y"),"%Y")
+
+#filter within years 03 to 05
+data03to05 <- subset(data, y > 2002 & y< 2006)
+
+#drop missing CPC class codes
+finaldata03to05<- data03to05[!data03to05$CPCClass %in% "NULL", ] 
+
+#drop missing Assignee Names
+cleandata03to05 <- finaldata03to05[!finaldata03to05$AssigneeName %in% "NULL", ]
+
+write.csv(cleandata03to05, "clean03to05.csv")
+
+#================================================================
+#upload kpss database
+kpss <- read.csv("patents.csv")
+
+#change PatentNo Column to match the cleandata03to05 header
+colnames(kpss)[1] <-"PatentNo"
+
+#drop patents without xi value which signals non-public company
+cleankpss <- kpss[!kpss$xi %in% NA, ] 
+head(kpss)
+write.csv(cleankpss, "cleankpss.csv")
+
+#convert to numeric format for merge
+cleandata03to05$PatentNo = as.numeric(as.character(cleandata03to05$PatentNo))
+
+#inner join based on patent number
+cleanmerge03to05 <- inner_join(cleandata03to05, cleankpss, by= "PatentNo")
+write.csv(cleanmerge03to05, "cleanmerge03to05.csv")
+
+#================================================================
+#upload disambiguuation data and convert to dataframe
+disambig <- read.delim("disambiguation.tsv")
+disambig <- as.data.frame(disambig)
+View(head(disambig))
+
+#convert number to be numeric for join
+disambig$Patent = as.numeric(as.character(disambig$Patent))
+
+#inner join off patent number to have unified disambiguated Assignee names
+disambig03to05 <- inner_join(cleanmerge03to05, disambig, by= c("PatentNo" = "Patent"))
+
+#write csv file for pivoting and sparse matrix
+write.csv(disambig03to05, "disambig03to05.csv")
+```
+<br>
+### Appendix B: Slicing CPC Class Codes and Pivot Table  
+```{python, eval = FALSE}
+################ CPC Class and Month ############################
+import pandas as pd
+import numpy as np
+### Read the data
+Data = pd.read_csv("disambig03to05.csv")
+
+Data = pd.DataFrame(Data, columns = ['MatchAsgName', 'CPCClass'])
+Data['MainClass'] = 0
+df3 = pd.DataFrame()
+
+r = range(len(Data))
+################## Patent MainClass #########################
+#splicing of MainClass IDs
+for i in r:
+    Data['MainClass'][i] = (Data["CPCClass"][i].split('+')[0]).split(' ')[0]
+    print (i)
+    if len((Data["CPCClass"][i].split('+'))) > 1:
+    	for j in range(1, len((Data["CPCClass"][i].split('+')))):
+    		b = ((Data["CPCClass"][i].split('+'))[j]).split(' ')[0]
+    		df2 = pd.DataFrame([[Data['MatchAsgName'][i], b]], columns=['MatchAsgName', 'MainClass'])
+    		df3 = df3.append(df2)
+
+Data = Data.append(df3)
+Data = pd.DataFrame(Data, columns = ['MatchAsgName', 'MainClass'])
+
+#create pivot table: company x Main Class
+dp = pd.pivot_table(Data, index = 'MatchAsgName', columns = 'MainClass', aggfunc = len)
+
+#company and Main Class
+Data.to_csv('disambig03to05Out1.csv', sep=',')
+
+#pivot table
+dp.to_csv('disambig03to05Out2.csv', sep=',')
+
+```
+<br>
+### Appendix C: K-means Clustering  
+```{r kmeans, eval = FALSE}
+setwd("~/berkeley/capstone")
+
+library(data.table)
+library(readr)
+library(dplyr)
+library(stringr)
+
+# read disambiguated csvfile from 03 to 05 and replace NAs with 0
+patent <- read.csv("disambig03to05Out2.csv")
+patent[is.na(patent)] <- 0
+
+View(head(patent,5))
+
+# scale the data set
+df <- scale(patent[-1])
+
+# find the "rule of thumb" cluster size
+sqrt(nrow(df)/2)
+
+# code below find optimal cluster size
+wssplot <- function(data, nc=200, seed=1234){
+  wss <- (nrow(data)-1)*sum(apply(data,2,var))
+  for (i in 2:nc){
+    set.seed(seed)
+    wss[i] <- sum(kmeans(data, centers=i)$withinss)}
+  plot(1:nc, wss, type="b", xlab="Number of Clusters",
+       ylab="Within groups sum of squares")
+  wss
+}
+# 
+wssplot(df)
+
+#40 cluster sizes
+fit.km <- kmeans(df,40)
+
+fit.km$size
+fit.km$cluster
+fit.km$betweenss
+fit.km$tot.withinss
+fit.km$withinss
+fit.km$betweenss/fit.km$tot.withinss
+head(fit.km$centers)
+
+# append cluster size
+patent$cluster <- fit.km$cluster
+
+#select clusters and extract patent and assignee name
+cluster_df <- select(patent, MatchAsgName, cluster)
+df1 <- filter(cluster_df, cluster %in% c(6, 7, 9,13,14,16, 29,32, 33, 38))
+df1 <- arrange(df1, cluster)
+df1
+
+df3 <- t(df1)
+write.csv(df1, "companycluster03to05.csv")
+
+df <- read.csv("companycluster03to05.csv", header=TRUE, stringsAsFactors=FALSE)
+
+#create a column listing all the competitors
+df$Competitors <- mapply(function(x,y)
+  toString(setdiff(x,y)),
+  ave(df$MatchAsgName,df$cluster,FUN= list),df$MatchAsgName)  
+
+write.csv(df, "companycompetitors03to05.csv")
+```
